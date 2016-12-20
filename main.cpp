@@ -318,8 +318,8 @@ void generate_sine(const snd_pcm_channel_area_t *areas, snd_pcm_uframes_t offset
     static double max_phase = 2. * M_PI;
     double phase = *_phase;
     double step = max_phase*freq/(double)sample_rate;
-    unsigned char *samples[channels];
-    int steps[channels];
+    unsigned char** samples = new unsigned char* [channels];
+    int* steps = new int [channels];
     unsigned int chn;
     int format_bits = snd_pcm_format_width(SND_PCM_FORMAT_S16_LE);
     unsigned int maxval = (1 << (format_bits - 1)) - 1;
@@ -373,6 +373,9 @@ void generate_sine(const snd_pcm_channel_area_t *areas, snd_pcm_uframes_t offset
                     phase -= max_phase;
     }
     *_phase = phase;
+
+    delete [] samples;
+    delete [] steps;
 }
 
 void terminate_alsa(snd_pcm_t** pcm) {
