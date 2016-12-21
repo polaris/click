@@ -10,18 +10,20 @@
 #include <chrono>
 
 #include <signal.h>
+#include <inttypes.h>
 
 bool verbose = false;
 std::atomic<bool> running;
 
-void initialize_alsa(snd_pcm_t** pcm, snd_pcm_status_t** status, snd_output_t** output, const std::string& device_name, unsigned int sample_rate, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size, unsigned int channels);
+void initialize_alsa(snd_pcm_t** pcm, snd_output_t** output, const std::string& device_name, unsigned int sample_rate, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size, unsigned int channels);
 void set_hw_params(snd_pcm_t* pcm, unsigned int sample_rate, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size, unsigned int channels);
 void set_sw_params(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size);
 void terminate_alsa(snd_pcm_t** pcm);
-int playback_loop(snd_pcm_t* pcm, snd_pcm_status_t* status, snd_pcm_uframes_t period_size, unsigned int period_time, unsigned int sample_rate, unsigned int channels);
+int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int period_time, unsigned int sample_rate, unsigned int channels);
 void generate_sine(const snd_pcm_channel_area_t *areas, snd_pcm_uframes_t offset, int count, double *_phase, unsigned int sample_rate, unsigned int channels);
 int xrun_recovery(snd_pcm_t* pcm, int err);
 void signal_handler(int);
+uint64_t timespec_us(const struct timespec *ts);
 
 namespace po = boost::program_options;
 
@@ -62,10 +64,9 @@ int main(int argc, char* argv[]) {
     const auto buffer_size = period_size * 2;
 
     snd_pcm_t* pcm = nullptr;
-    snd_pcm_status_t* status = nullptr;
     snd_output_t* output = nullptr;
 
-    initialize_alsa(&pcm, &status, &output, device_name, sample_rate, period_size, buffer_size, channels);
+    initialize_alsa(&pcm, &output, device_name, sample_rate, period_size, buffer_size, channels);
 
     if (verbose) {
         snd_pcm_dump(pcm, output);
@@ -75,8 +76,8 @@ int main(int argc, char* argv[]) {
 
     signal(SIGINT, signal_handler);
 
-    std::thread thread([pcm, status, period_size, period_time, sample_rate, channels] () {
-        playback_loop(pcm, status, period_size, period_time, sample_rate, channels);
+    std::thread thread([pcm, period_size, period_time, sample_rate, channels] () {
+        playback_loop(pcm, period_size, period_time, sample_rate, channels);
     });
 
     thread.join();
@@ -84,7 +85,7 @@ int main(int argc, char* argv[]) {
     terminate_alsa(&pcm);
 }
 
-void initialize_alsa(snd_pcm_t** pcm, snd_pcm_status_t** status, snd_output_t** output, const std::string& device_name, unsigned int sample_rate, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size, unsigned int channels) {
+void initialize_alsa(snd_pcm_t** pcm, snd_output_t** output, const std::string& device_name, unsigned int sample_rate, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size, unsigned int channels) {
     int err = 0;
     
     err = snd_output_stdio_attach(output, stdout, 0);
@@ -103,8 +104,6 @@ void initialize_alsa(snd_pcm_t** pcm, snd_pcm_status_t** status, snd_output_t** 
     set_hw_params(*pcm, sample_rate, period_size, buffer_size, channels);
     
     set_sw_params(*pcm, period_size, buffer_size);
-
-    snd_pcm_status_alloca(status);
 }
 
 void set_hw_params(snd_pcm_t* pcm, unsigned int sample_rate, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size, unsigned int channels) {
@@ -121,6 +120,13 @@ void set_hw_params(snd_pcm_t* pcm, unsigned int sample_rate, snd_pcm_uframes_t p
     if (err < 0) {
         std::cerr << "Failed to fill hardware params with configuration space for a PCM: " << snd_strerror(err) << "\n";
         exit(-1);
+    }
+
+    int supports_audio_wallclock_ts = snd_pcm_hw_params_supports_audio_wallclock_ts(params);
+    if (supports_audio_wallclock_ts == 1) {
+        std::cout << "Audio wallclock timestamps supported\n";
+    } else {
+        std::cout << "Audio wallclock timestamps not supported\n";
     }
 
     err = snd_pcm_hw_params_set_access(pcm, params, SND_PCM_ACCESS_MMAP_INTERLEAVED);
@@ -217,9 +223,12 @@ void set_sw_params(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, snd_pcm_uframe
     snd_pcm_sw_params_free(params);
 }
 
-int playback_loop(snd_pcm_t* pcm, snd_pcm_status_t* status, snd_pcm_uframes_t period_size, unsigned int period_time, unsigned int sample_rate, unsigned int channels) {
+int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int period_time, unsigned int sample_rate, unsigned int channels) {
     int err = 0, first = 1;
     double phase = 0;
+    int64_t last_audio_time_us = 0;
+    int64_t last_driver_time_us = 0;
+    int64_t last_system_time_us = 0;
 
     while (running) {
         auto state = snd_pcm_state(pcm);
@@ -268,23 +277,38 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_status_t* status, snd_pcm_uframes_t pe
             continue;
         }
 
+        snd_pcm_sframes_t delay;
+        err = snd_pcm_delay(pcm, &delay);
+        assert(err == 0);
+
+        snd_pcm_status_t* status;
+        snd_pcm_status_alloca(&status);
         err = snd_pcm_status(pcm, status);
         assert(err == 0);
 
-        struct timespec timestamp;
-        snd_pcm_status_get_htstamp(status, &timestamp);
-        snd_pcm_sframes_t delay = snd_pcm_status_get_delay(status);
-        state = snd_pcm_status_get_state(status);
+        struct timespec audio_time;
+        snd_pcm_status_get_htstamp(status, &audio_time);
+        int64_t audio_time_us = timespec_us(&audio_time);
 
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        long us = static_cast<long>(std::round(static_cast<double>(now.tv_nsec) / 1000.0));
-        long us2 = static_cast<long>(std::round(static_cast<double>(timestamp.tv_nsec) / 1000.0));
-        long diff = 1000000 - us;
-        long diff2 = 1000000 - us2;
-        if (diff < period_time) {
-            printf("%03ld, %03ld, %ld, %ld\n", diff, diff2, avail, delay);
+        struct timespec driver_time;
+        snd_pcm_status_get_driver_htstamp(status, &driver_time);
+        int64_t driver_time_us = timespec_us(&driver_time);
+
+        struct timespec system_time;
+        clock_gettime(CLOCK_MONOTONIC, &system_time);
+        int64_t system_time_us = timespec_us(&system_time);
+
+        if (last_system_time_us != 0 && last_driver_time_us != 0) {
+            int64_t system_time_diff = system_time_us - last_system_time_us;
+            int64_t driver_time_diff = driver_time_us - last_driver_time_us;
+            int64_t audio_time_diff = audio_time_us - last_audio_time_us;
+	    int64_t system_driver_delay = system_time_us - driver_time_us;
+	    int64_t driver_audio_delay = driver_time_us - audio_time_us;
+            std::cout << system_time_diff << ", " << driver_time_diff << ", " << system_driver_delay << ", " << driver_audio_delay << "\n";
         }
+        last_system_time_us = system_time_us;
+        last_driver_time_us = driver_time_us;
+        last_audio_time_us = audio_time_us;
 
         snd_pcm_uframes_t size = period_size;
         while (size > 0) {
@@ -420,4 +444,8 @@ void signal_handler(int) {
         std::cerr << "Shutting down\n";
     }
     running = false;
+}
+
+uint64_t timespec_us(const struct timespec *ts) {
+    return ts->tv_sec * 1000000LLU + ts->tv_nsec / 1000LLU;
 }
