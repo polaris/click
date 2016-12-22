@@ -228,6 +228,7 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int pe
     double phase = 0;
     int64_t last_audio_time_us = 0;
     int64_t last_driver_time_us = 0;
+    int64_t last_pcm_time_us = 0;
     int64_t last_system_time_us = 0;
 
     while (running) {
@@ -277,36 +278,51 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int pe
             continue;
         }
 
-        snd_pcm_sframes_t delay;
-        err = snd_pcm_delay(pcm, &delay);
-        assert(err == 0);
+        // snd_pcm_sframes_t delay;
+        // err = snd_pcm_delay(pcm, &delay);
+        // assert(err == 0);
 
         snd_pcm_status_t* status;
         snd_pcm_status_alloca(&status);
         err = snd_pcm_status(pcm, status);
         assert(err == 0);
 
+        struct timespec system_time;
+        clock_gettime(CLOCK_MONOTONIC, &system_time);
+        int64_t system_time_us = timespec_us(&system_time);
+
+        struct timespec trigger_time;
+        snd_pcm_status_get_trigger_htstamp(status, &trigger_time);
+        int64_t trigger_time_us = timespec_us(&trigger_time);
+
         struct timespec audio_time;
-        snd_pcm_status_get_htstamp(status, &audio_time);
-        int64_t audio_time_us = timespec_us(&audio_time);
+        snd_pcm_status_get_audio_htstamp(status, &audio_time);
+        int64_t audio_time_us = timespec_us(&audio_time) + trigger_time_us;
 
         struct timespec driver_time;
         snd_pcm_status_get_driver_htstamp(status, &driver_time);
         int64_t driver_time_us = timespec_us(&driver_time);
 
-        struct timespec system_time;
-        clock_gettime(CLOCK_MONOTONIC, &system_time);
-        int64_t system_time_us = timespec_us(&system_time);
+        struct timespec pcm_time;
+        snd_pcm_status_get_htstamp(status, &pcm_time);
+        int64_t pcm_time_us = timespec_us(&pcm_time);
 
-        if (last_system_time_us != 0 && last_driver_time_us != 0) {
+        if (last_system_time_us != 0) {
             int64_t system_time_diff = system_time_us - last_system_time_us;
+            int64_t pcm_time_diff = pcm_time_us - last_pcm_time_us;
             int64_t driver_time_diff = driver_time_us - last_driver_time_us;
             int64_t audio_time_diff = audio_time_us - last_audio_time_us;
-	    int64_t system_driver_delay = system_time_us - driver_time_us;
-	    int64_t driver_audio_delay = driver_time_us - audio_time_us;
-            std::cout << system_time_diff << ", " << driver_time_diff << ", " << system_driver_delay << ", " << driver_audio_delay << "\n";
+
+            int64_t system_pcm_delay = system_time_us - driver_time_us;
+
+            int64_t driver_pcm_delay = driver_time_us - pcm_time_us;
+
+            int64_t driver_audio_delay = pcm_time_us - audio_time_us;
+
+            std::cout << system_time_diff << "\t" << pcm_time_diff << "\t" << driver_time_diff << "\t" << audio_time_diff << "\t" << system_pcm_delay << "\t" << driver_pcm_delay << "\t" << driver_audio_delay << "\n";
         }
         last_system_time_us = system_time_us;
+        last_pcm_time_us = pcm_time_us;
         last_driver_time_us = driver_time_us;
         last_audio_time_us = audio_time_us;
 
