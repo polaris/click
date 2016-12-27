@@ -348,7 +348,7 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int pe
                 first = 1;
             }
 
-            generate_click_track(presentation_time_us, period_time_us, 10000, sample_rate, channels, &phase, channel_area, offset, frames);
+            generate_click_track(presentation_time_us, period_time_us, 20000, sample_rate, channels, &phase, channel_area, offset, frames);
             presentation_time_us += frames_us(sample_rate, frames);
 
             //generate_sine(channel_area, offset, static_cast<int>(frames), &phase, sample_rate, channels);
@@ -385,19 +385,21 @@ void generate_click_track(int64_t presentation_time_us, unsigned int period_time
 
     //const int64_t diff = 1000000 - (presentation_time_us % 1000000);
 
-    for (unsigned int channel = 0; channel < channels; channel++) {
-        for (unsigned int frame = 0; frame < frames; frame++) {
+    for (unsigned int frame = 0; frame < frames; frame++) {
+        int16_t value = 0;
+        if (diff_second < click_duration_us) {
+            value = static_cast<int16_t>(sin(phs) * (.75 * 0x8000));
+            phs += step;
+            if (phs >= max_phase) {
+                phs -= max_phase;
+            }
+        }
+        diff_second += inc;
+
+        for (unsigned int channel = 0; channel < channels; channel++) {
             auto sampleAddress = (int16_t*)channel_area[channel].addr;
             sampleAddress += (channel_area[channel].first + (frame + offset) * channel_area[channel].step) / 16;
-            *sampleAddress = 0;
-            if (diff_second < click_duration_us) {
-                *sampleAddress = static_cast<int16_t>(sin(phs) * (.75 * 0x8000));
-                phs += step;
-                if (phs >= max_phase) {
-                    phs -= max_phase;
-                }
-            }
-            diff_second += inc;
+            *sampleAddress = value;
         }
     }
     *phase = phs;
