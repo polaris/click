@@ -15,12 +15,16 @@
 bool verbose = false;
 std::atomic<bool> running;
 
-void initialize_alsa(snd_pcm_t** pcm, snd_output_t** output, const std::string& device_name, unsigned int sample_rate, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size, unsigned int channels);
+void initialize_alsa(snd_pcm_t** pcm, snd_output_t** output, const std::string& device_name, unsigned int sample_rate,
+    snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size, unsigned int channels);
 void set_hw_params(snd_pcm_t* pcm, unsigned int sample_rate, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size, unsigned int channels);
 void set_sw_params(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, snd_pcm_uframes_t buffer_size);
 void terminate_alsa(snd_pcm_t** pcm);
-int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int period_time, unsigned int sample_rate, unsigned int channels);
-void generate_sine(const snd_pcm_channel_area_t *areas, snd_pcm_uframes_t offset, int count, double *_phase, unsigned int sample_rate, unsigned int channels);
+int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int period_time_us, unsigned int sample_rate, unsigned int channels);
+void generate_click_track(int64_t system_time_us, unsigned int period_time_us, unsigned int click_duration_us, unsigned int sample_rate,
+    unsigned int channels, double* phase, const snd_pcm_channel_area_t* channel_area, snd_pcm_uframes_t offset, snd_pcm_uframes_t frames);
+void generate_sine(const snd_pcm_channel_area_t *areas, snd_pcm_uframes_t offset, int count, double *_phase, 
+    unsigned int sample_rate, unsigned int channels);
 int xrun_recovery(snd_pcm_t* pcm, int err);
 void signal_handler(int);
 uint64_t timespec_us(const struct timespec *ts);
@@ -30,14 +34,14 @@ namespace po = boost::program_options;
 int main(int argc, char* argv[]) {
     std::string device_name = "default";
     unsigned int sample_rate = 48000;
-    unsigned int period_time = 1000;
+    unsigned int period_time_us = 1000;
     unsigned int channels = 2;
 
     po::options_description desc("Options");
     desc.add_options()
         ("device,d", po::value<std::string>(&device_name)->default_value(device_name), "the device name of the audio hardware")
         ("samplerate,s", po::value<unsigned int>(&sample_rate)->default_value(sample_rate), "the sample rate in Hertz")
-        ("periodtime,t", po::value<unsigned int>(&period_time)->default_value(period_time), "the packet time in us (125, 250, 333, 1000)")
+        ("periodtime,t", po::value<unsigned int>(&period_time_us)->default_value(period_time_us), "the packet time in us (125, 250, 333, 1000)")
         ("channels,c", po::value<unsigned int>(&channels)->default_value(channels), "the number of channels")
         ("verbose,v", "verbose output")
         ("help,h", "produce help message");
@@ -60,7 +64,7 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    const auto period_size = static_cast<snd_pcm_uframes_t>(std::round(sample_rate * 0.000001 * period_time));
+    const auto period_size = static_cast<snd_pcm_uframes_t>(std::round(sample_rate * 0.000001 * period_time_us));
     const auto buffer_size = period_size * 2;
 
     snd_pcm_t* pcm = nullptr;
@@ -76,8 +80,8 @@ int main(int argc, char* argv[]) {
 
     signal(SIGINT, signal_handler);
 
-    std::thread thread([pcm, period_size, period_time, sample_rate, channels] () {
-        playback_loop(pcm, period_size, period_time, sample_rate, channels);
+    std::thread thread([pcm, period_size, period_time_us, sample_rate, channels] () {
+        playback_loop(pcm, period_size, period_time_us, sample_rate, channels);
     });
 
     thread.join();
@@ -223,7 +227,11 @@ void set_sw_params(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, snd_pcm_uframe
     snd_pcm_sw_params_free(params);
 }
 
-int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int period_time, unsigned int sample_rate, unsigned int channels) {
+int64_t frames_us(unsigned int sample_rate, snd_pcm_sframes_t frames) {
+    return (1.0 / sample_rate) * 1000000 * frames;
+}
+
+int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int period_time_us, unsigned int sample_rate, unsigned int channels) {
     int err = 0, first = 1;
     double phase = 0;
     int64_t last_audio_time_us = 0;
@@ -247,8 +255,10 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int pe
                 return err;
             }
         }
-        snd_pcm_sframes_t avail = snd_pcm_avail_update(pcm);
-        if (avail < 0) {
+
+        snd_pcm_sframes_t avail = 0, delay = 0;
+        err = snd_pcm_avail_delay(pcm, &avail, &delay);
+        if (err < 0) {
                 err = xrun_recovery(pcm, static_cast<int>(avail));
                 if (err < 0) {
                     std::cerr << "Failed to update avail: " << snd_strerror(err) << "\n";
@@ -277,10 +287,6 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int pe
             }
             continue;
         }
-
-        // snd_pcm_sframes_t delay;
-        // err = snd_pcm_delay(pcm, &delay);
-        // assert(err == 0);
 
         snd_pcm_status_t* status;
         snd_pcm_status_alloca(&status);
@@ -319,12 +325,15 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int pe
 
             int64_t driver_audio_delay = pcm_time_us - audio_time_us;
 
-            std::cout << system_time_diff << "\t" << pcm_time_diff << "\t" << driver_time_diff << "\t" << audio_time_diff << "\t" << system_pcm_delay << "\t" << driver_pcm_delay << "\t" << driver_audio_delay << "\n";
+            //std::cout << avail << ", " << delay << ", " << system_time_diff << "\t" << pcm_time_diff << "\t" << driver_time_diff << "\t" << audio_time_diff << "\t" << system_pcm_delay << "\t" << driver_pcm_delay << "\t" << driver_audio_delay << "\n";
         }
         last_system_time_us = system_time_us;
         last_pcm_time_us = pcm_time_us;
         last_driver_time_us = driver_time_us;
         last_audio_time_us = audio_time_us;
+
+        int64_t delay_us = frames_us(sample_rate, delay);
+        int64_t presentation_time_us = system_time_us + delay_us;
 
         snd_pcm_uframes_t size = period_size;
         while (size > 0) {
@@ -338,7 +347,12 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int pe
                 }
                 first = 1;
             }
-            generate_sine(channel_area, offset, static_cast<int>(frames), &phase, sample_rate, channels);
+
+            generate_click_track(presentation_time_us, period_time_us, 10000, sample_rate, channels, &phase, channel_area, offset, frames);
+            presentation_time_us += frames_us(sample_rate, frames);
+
+            //generate_sine(channel_area, offset, static_cast<int>(frames), &phase, sample_rate, channels);
+
             snd_pcm_sframes_t commit_result = snd_pcm_mmap_commit(pcm, offset, frames);
             if (commit_result < 0 || (snd_pcm_uframes_t)commit_result != frames) {
                 if ((err = xrun_recovery(pcm, commit_result >= 0 ? -EPIPE : static_cast<int>(commit_result))) < 0) {
@@ -353,7 +367,45 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int pe
     return 0;
 }
 
-void generate_sine(const snd_pcm_channel_area_t *areas, snd_pcm_uframes_t offset, int count, double *_phase, unsigned int sample_rate, unsigned int channels) {
+void generate_click_track(int64_t presentation_time_us, unsigned int period_time_us, unsigned int click_duration_us, 
+                            unsigned int sample_rate, unsigned int channels, double* phase, 
+                            const snd_pcm_channel_area_t* channel_area, snd_pcm_uframes_t offset, snd_pcm_uframes_t frames) {
+    static const double freq = 880;
+    static const double max_phase = 2. * M_PI;
+    const double step = max_phase * freq / static_cast<double>(sample_rate);
+    double phs = *phase;
+
+
+    int64_t floor_second = 1000000 * (presentation_time_us / 1000000);
+    double diff_second = presentation_time_us - floor_second;
+    double inc = 1000.0 / sample_rate;
+
+    std::cout << floor_second << ", " << diff_second << ", " << inc << "\n";
+
+
+    //const int64_t diff = 1000000 - (presentation_time_us % 1000000);
+
+    for (unsigned int channel = 0; channel < channels; channel++) {
+        for (unsigned int frame = 0; frame < frames; frame++) {
+            auto sampleAddress = (int16_t*)channel_area[channel].addr;
+            sampleAddress += (channel_area[channel].first + (frame + offset) * channel_area[channel].step) / 16;
+            *sampleAddress = 0;
+            if (diff_second < click_duration_us) {
+                *sampleAddress = static_cast<int16_t>(sin(phs) * (.75 * 0x8000));
+                phs += step;
+                if (phs >= max_phase) {
+                    phs -= max_phase;
+                }
+            }
+            diff_second += inc;
+        }
+    }
+    *phase = phs;
+}
+
+void generate_sine(const snd_pcm_channel_area_t *areas, snd_pcm_uframes_t offset, int count, double *_phase, 
+    unsigned int sample_rate, unsigned int channels) {
+    
     static double freq = 440;                               /* sinusoidal wave frequency in Hz */
     static double max_phase = 2. * M_PI;
     double phase = *_phase;
