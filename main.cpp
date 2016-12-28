@@ -12,6 +12,10 @@
 #include <signal.h>
 #include <inttypes.h>
 
+#include <boost/accumulators/accumulators.hpp>
+#include <boost/accumulators/statistics/stats.hpp>
+#include <boost/accumulators/statistics/rolling_mean.hpp>
+
 bool verbose = false;
 std::atomic<bool> running;
 
@@ -232,10 +236,12 @@ int64_t frames_us(unsigned int sample_rate, snd_pcm_sframes_t frames) {
 int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int sample_rate, unsigned int channels) {
     int err = 0, first = 1;
     double phase = 0;
-    int64_t last_audio_time_us = 0;
+/*    int64_t last_audio_time_us = 0;
     int64_t last_driver_time_us = 0;
     int64_t last_pcm_time_us = 0;
-    int64_t last_system_time_us = 0;
+    int64_t last_system_time_us = 0;*/
+
+    // boost::accumulators::accumulator_set<int64_t, boost::accumulators::stats<boost::accumulators::tag::rolling_mean>> acc(boost::accumulators::tag::rolling_window::window_size = 100000);
 
     while (running) {
         auto state = snd_pcm_state(pcm);
@@ -286,16 +292,18 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int sa
             continue;
         }
 
-        snd_pcm_status_t* status;
+/*        snd_pcm_status_t* status;
         snd_pcm_status_alloca(&status);
         err = snd_pcm_status(pcm, status);
-        assert(err == 0);
+        assert(err == 0);*/
 
         struct timespec system_time;
-        clock_gettime(CLOCK_MONOTONIC, &system_time);
+        clock_gettime(CLOCK_REALTIME, &system_time);
         const int64_t system_time_us = timespec_us(&system_time);
 
-        struct timespec driver_time;
+        // std::cout << avail << ", " << delay << "\n";
+
+/*        struct timespec driver_time;
         snd_pcm_status_get_driver_htstamp(status, &driver_time);
         const int64_t driver_time_us = timespec_us(&driver_time);
 
@@ -323,13 +331,16 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int sa
 
             const int64_t driver_audio_delay = pcm_time_us - audio_time_us;
 
-            std::cout << avail << ", " << delay << ", " << system_time_diff << "\t" << pcm_time_diff << "\t" << driver_time_diff << "\t" << audio_time_diff << "\t" << system_pcm_delay << "\t" << driver_pcm_delay << "\t" << driver_audio_delay << "\n";
+            //if (driver_audio_delay <= 1000)
+            //    acc(driver_audio_delay);
+
+            //std::cout << avail << ", " << delay << ", " << system_time_diff << "\t" << pcm_time_diff << "\t" << driver_time_diff << "\t" << audio_time_diff << "\t" << system_pcm_delay << "\t" << driver_pcm_delay << "\t" << driver_audio_delay << "\t" << boost::accumulators::rolling_mean(acc) << "\n";
         }
 
         last_system_time_us = system_time_us;
         last_pcm_time_us = pcm_time_us;
         last_driver_time_us = driver_time_us;
-        last_audio_time_us = audio_time_us;
+        last_audio_time_us = audio_time_us;*/
 
         const int64_t delay_us = frames_us(sample_rate, delay);
         int64_t presentation_time_us = system_time_us + delay_us;
@@ -388,6 +399,8 @@ void generate_click_track(int64_t presentation_time_us, unsigned int click_durat
             if (phs >= max_phase) {
                 phs -= max_phase;
             }
+        } else {
+            phs = 0;
         }
         diff_second += inc;
 
