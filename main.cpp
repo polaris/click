@@ -232,10 +232,10 @@ int64_t frames_us(unsigned int sample_rate, snd_pcm_sframes_t frames) {
 int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int sample_rate, unsigned int channels) {
     int err = 0, first = 1;
     double phase = 0;
-/*    int64_t last_audio_time_us = 0;
+    int64_t last_audio_time_us = 0;
     int64_t last_driver_time_us = 0;
     int64_t last_pcm_time_us = 0;
-    int64_t last_system_time_us = 0;*/
+    int64_t last_system_time_us = 0;
 
     while (running) {
         auto state = snd_pcm_state(pcm);
@@ -286,52 +286,52 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int sa
             continue;
         }
 
-/*        snd_pcm_status_t* status;
+        snd_pcm_status_t* status;
         snd_pcm_status_alloca(&status);
         err = snd_pcm_status(pcm, status);
-        assert(err == 0);*/
+        assert(err == 0);
 
         struct timespec system_time;
         clock_gettime(CLOCK_MONOTONIC, &system_time);
-        int64_t system_time_us = timespec_us(&system_time);
-
-/*        struct timespec trigger_time;
-        snd_pcm_status_get_trigger_htstamp(status, &trigger_time);
-        int64_t trigger_time_us = timespec_us(&trigger_time);
-
-        struct timespec audio_time;
-        snd_pcm_status_get_audio_htstamp(status, &audio_time);
-        int64_t audio_time_us = timespec_us(&audio_time) + trigger_time_us;
+        const int64_t system_time_us = timespec_us(&system_time);
 
         struct timespec driver_time;
         snd_pcm_status_get_driver_htstamp(status, &driver_time);
-        int64_t driver_time_us = timespec_us(&driver_time);
+        const int64_t driver_time_us = timespec_us(&driver_time);
 
         struct timespec pcm_time;
         snd_pcm_status_get_htstamp(status, &pcm_time);
-        int64_t pcm_time_us = timespec_us(&pcm_time);
+        const int64_t pcm_time_us = timespec_us(&pcm_time);
+
+        struct timespec trigger_time;
+        snd_pcm_status_get_trigger_htstamp(status, &trigger_time);
+        const int64_t trigger_time_us = timespec_us(&trigger_time);
+
+        struct timespec audio_time;
+        snd_pcm_status_get_audio_htstamp(status, &audio_time);
+        const int64_t audio_time_us = timespec_us(&audio_time) + trigger_time_us;
 
         if (last_system_time_us != 0) {
-            int64_t system_time_diff = system_time_us - last_system_time_us;
-            int64_t pcm_time_diff = pcm_time_us - last_pcm_time_us;
-            int64_t driver_time_diff = driver_time_us - last_driver_time_us;
-            int64_t audio_time_diff = audio_time_us - last_audio_time_us;
+            const int64_t system_time_diff = system_time_us - last_system_time_us;
+            const int64_t pcm_time_diff = pcm_time_us - last_pcm_time_us;
+            const int64_t driver_time_diff = driver_time_us - last_driver_time_us;
+            const int64_t audio_time_diff = audio_time_us - last_audio_time_us;
 
-            int64_t system_pcm_delay = system_time_us - driver_time_us;
+            const int64_t system_pcm_delay = system_time_us - driver_time_us;
 
-            int64_t driver_pcm_delay = driver_time_us - pcm_time_us;
+            const int64_t driver_pcm_delay = driver_time_us - pcm_time_us;
 
-            int64_t driver_audio_delay = pcm_time_us - audio_time_us;
+            const int64_t driver_audio_delay = pcm_time_us - audio_time_us;
 
-            //std::cout << avail << ", " << delay << ", " << system_time_diff << "\t" << pcm_time_diff << "\t" << driver_time_diff << "\t" << audio_time_diff << "\t" << system_pcm_delay << "\t" << driver_pcm_delay << "\t" << driver_audio_delay << "\n";
+            std::cout << avail << ", " << delay << ", " << system_time_diff << "\t" << pcm_time_diff << "\t" << driver_time_diff << "\t" << audio_time_diff << "\t" << system_pcm_delay << "\t" << driver_pcm_delay << "\t" << driver_audio_delay << "\n";
         }
 
         last_system_time_us = system_time_us;
         last_pcm_time_us = pcm_time_us;
         last_driver_time_us = driver_time_us;
-        last_audio_time_us = audio_time_us;*/
+        last_audio_time_us = audio_time_us;
 
-        int64_t delay_us = frames_us(sample_rate, delay);
+        const int64_t delay_us = frames_us(sample_rate, delay);
         int64_t presentation_time_us = system_time_us + delay_us;
 
         snd_pcm_uframes_t size = period_size;
@@ -348,9 +348,8 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int sa
             }
 
             generate_click_track(presentation_time_us, 20000, sample_rate, channels, &phase, channel_area, offset, frames);
-            presentation_time_us += frames_us(sample_rate, frames);
 
-            //generate_sine(channel_area, offset, static_cast<int>(frames), &phase, sample_rate, channels);
+            presentation_time_us += frames_us(sample_rate, frames);
 
             snd_pcm_sframes_t commit_result = snd_pcm_mmap_commit(pcm, offset, frames);
             if (commit_result < 0 || (snd_pcm_uframes_t)commit_result != frames) {
@@ -360,6 +359,7 @@ int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int sa
                 }
                 first = 1;
             }
+
             size -= frames;
         }
     }
