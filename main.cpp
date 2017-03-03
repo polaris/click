@@ -230,7 +230,7 @@ void set_sw_params(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, snd_pcm_uframe
 }
 
 int64_t frames_us(unsigned int sample_rate, snd_pcm_sframes_t frames) {
-    return static_cast<int64_t>((1.0 / sample_rate) * 1000000 * frames);
+    return static_cast<int64_t>((1.0 / sample_rate) * static_cast<double>(1000000 * frames));
 }
 
 int playback_loop(snd_pcm_t* pcm, snd_pcm_uframes_t period_size, unsigned int sample_rate, unsigned int channels) {
