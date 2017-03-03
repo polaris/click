@@ -10,11 +10,17 @@ CFLAGS := -O3 -Wall -Weffc++ -pedantic -pedantic-errors -Wextra -Wcast-align \
 
 LDFLAGS := -lboost_system -lboost_program_options -lasound -lm -lstdc++ -pthread -std=c++14
 
-all: click
+all: click streamer dll
 
 click: main.cpp
 	$(CC) $(CFLAGS) main.cpp $(LDFLAGS) -o $@
 
+streamer: streamer.cpp
+	$(CC) $(CFLAGS) streamer.cpp $(LDFLAGS) -o $@
+
+dll: dll.cpp
+	$(CC) $(CFLAGS) dll.cpp $(LDFLAGS) -o $@
+
 .PHONY: clean
 clean:
-	@rm -rf *.o click
+	@rm -rf *.o click streamer dll
